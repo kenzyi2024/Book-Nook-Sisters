@@ -1,74 +1,43 @@
-<<<<<<< HEAD
-# Getting Started with Create React App
+# Book Nook Sisters
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Book Nook is a cozy, animated digital bookshelf where you can track your reading, jot down notes, and enjoy a relaxing, warm aesthetic — complete with a flickering fireplace and twinkling stars.
 
-## Available Scripts
+---
 
-In the project directory, you can run:
+## Features
 
-### `npm start`
+- ** Add & Manage Books**  
+  - Search for books (or add manually)  
+  - Track reading progress  
+  - Set reading status (To Read, Reading, Finished)  
+  - Add tags and privacy settings  
+  - Rate your reads  
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- ** Journal & Notes**  
+  - Keep personal reading notes for each book  
+  - Mark notes as private or public  
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+- ** Animated Fireplace & Atmosphere**  
+  - Flickering flames, drifting sparks, and a cozy ambiance  
+  - Stars and moonlight for nighttime reading vibes  
 
-### `npm test`
+- ** User Personalization**  
+  - Choose your avatar emoji  
+  - Track books by “added by” user  
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+- ** Smooth Animations**  
+  - Framer Motion transitions  
+  - Responsive, mobile-friendly design  
 
-### `npm run build`
+---
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+##  Tech Stack
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+- **Frontend:** React + Vite
+- **Styling:** Tailwind CSS
+- **Animations:** Framer Motion
+- **Icons:** Lucide React
+- **State Management:** React Hooks (`useState`)
+- **Book Data:** (Currently mock data — can be extended to Google Books API)
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
-=======
-# Book-Nook-Sisters
->>>>>>> 3afa7cf79ad2554f7f16f8fc04643281d92d2363
+---
