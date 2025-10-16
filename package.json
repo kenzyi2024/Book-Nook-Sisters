@@ -1,13 +1,14 @@
 {
   "name": "book-nook-sisters",
   "version": "0.1.0",
-  "homepage": "https://yourusername.github.io/book-nook-sisters",
   "private": true,
   "dependencies": {
     "lucide-react": "^0.263.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "firebase": "^10.12.3",
+    "tailwindcss": "^3.4.17"
   },
   "scripts": {
     "start": "react-scripts start",
