@@ -1,0 +1,922 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken,
+} from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, query, orderBy, Timestamp } from 'firebase/firestore';
+import { BookOpen, PlusCircle, Trash2, CheckCircle, Clock, List, Loader2, Search, Pencil, Save } from 'lucide-react';
+
+// --- Global Firebase Configuration Variables ---
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+// --- End Global Variables ---
+
+// Voice configuration for TTS helper (optional feature)
+const TTS_VOICE = "Puck"; // An upbeat voice
+
+// Utility function to convert PCM audio data (from a potential TTS API call) to a playable WAV Blob
+const base64ToArrayBuffer = (base64) => {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+};
+
+// Utility function to convert signed 16-bit PCM audio to a WAV Blob
+const pcmToWav = (pcm16, sampleRate) => {
+  const numChannels = 1;
+  const numSamples = pcm16.length;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  
+  // RIFF header implementation...
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true);
+  view.setUint16(32, numChannels * 2, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+  
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    view.setInt16(offset, pcm16[i], true);
+    offset += 2;
+  }
+  
+  return new Blob([buffer], { type: 'audio/wav' });
+};
+
+const writeString = (view, offset, string) => {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+};
+
+// Utility for exponential backoff (retry logic)
+const makeApiRequest = async (url, options, maxRetries = 3) => {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      if (attempt === maxRetries - 1) {
+        console.error("API request failed after all retries:", error);
+        throw error;
+      }
+      const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      attempt++;
+    }
+  }
+};
+
+// --- Reusable Component for Scroll Reveal Animation ---
+const AnimateOnScroll = ({ children, delay = 0 }) => {
+    const [isVisible, setIsVisible] = useState(false);
+    const domRef = useRef(null);
+
+    useEffect(() => {
+        const observer = new IntersectionObserver(entries => {
+            // Trigger when the element is intersecting (10% visible)
+            if (entries[0].isIntersecting) {
+                setIsVisible(true);
+                // Stop observing once it's visible
+                observer.unobserve(domRef.current);
+            }
+        }, {
+            // Options: trigger when 10% of the element is visible
+            threshold: 0.1,
+        });
+
+        if (domRef.current) {
+            observer.observe(domRef.current);
+        }
+        
+        return () => {
+            if (domRef.current && observer) {
+                observer.unobserve(domRef.current);
+            }
+        };
+    }, []);
+
+    // Applies fade and slide-up transition based on isVisible state
+    return (
+        <div
+            ref={domRef}
+            className={`transition-all duration-700 ease-out transform ${
+                isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'
+            }`}
+            style={{ transitionDelay: `${delay}ms` }}
+        >
+            {children}
+        </div>
+    );
+};
+
+
+// Main App Component
+const App = () => {
+  // --- State Variables ---
+  const [books, setBooks] = useState([]);
+  const [db, setDb] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [filterStatus, setFilterStatus] = useState('All'); 
+  
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  
+  const [ttsLoading, setTtsLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  
+  // New state for scroll behavior
+  const [isFireplaceVisible, setIsFireplaceVisible] = useState(true);
+
+  // --- Firebase Initialization and Anonymous Authentication ---
+  useEffect(() => {
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestoreDb = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+
+      setDb(firestoreDb);
+
+      const setupAuth = async () => {
+        try {
+          let userCredential;
+          // Use provided token first, otherwise sign in anonymously
+          if (initialAuthToken) {
+            userCredential = await signInWithCustomToken(firebaseAuth, initialAuthToken);
+          } else {
+            userCredential = await signInAnonymously(firebaseAuth);
+          }
+          // Set the user ID from the successful sign-in
+          setUserId(userCredential.user.uid); 
+        } catch (error) {
+          console.error("Error setting up authentication (Anonymous/Token):", error);
+          // Fallback to a random ID if Firebase Auth fails entirely
+          setUserId(crypto.randomUUID()); 
+          setMessage("Warning: Could not connect to user profile. Data may not be saved persistently.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      setupAuth();
+    } catch (e) {
+      console.error("Error initializing Firebase:", e);
+      setLoading(false);
+    }
+  }, []);
+  
+  // --- Scroll Listener for Fireplace Visibility ---
+  useEffect(() => {
+    const SCROLL_THRESHOLD = 20; // How far the user needs to scroll before it hides
+
+    const handleScroll = () => {
+      if (window.scrollY > SCROLL_THRESHOLD) {
+        setIsFireplaceVisible(false);
+      } else {
+        setIsFireplaceVisible(true);
+      }
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  // --- Real-time Data Fetching (onSnapshot) ---
+  useEffect(() => {
+    // Only fetch data if DB is ready, we have a userId, and we're done loading
+    if (db && userId && !loading) {
+      const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+      const q = query(collection(db, booksCollectionPath), orderBy('createdAt', 'desc')); 
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const bookList = snapshot.docs.map(doc => ({
+          id: doc.id,
+          // Ensure notes exist for compatibility
+          notes: '', 
+          ...doc.data(),
+        }));
+        setBooks(bookList);
+      }, (error) => {
+        console.error("Error fetching books:", error);
+      });
+
+      return () => unsubscribe();
+    }
+  }, [db, userId, loading]);
+
+  // --- Event Handlers (Firestore & API) ---
+  const handleSearchBooks = async (e) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+
+    setSearchLoading(true);
+    setSearchResults([]);
+
+    const queryUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchQuery)}&maxResults=10`;
+
+    try {
+      const result = await makeApiRequest(queryUrl, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const items = result.items || [];
+      const formattedResults = items.map(item => {
+        const volumeInfo = item.volumeInfo;
+        return {
+          id: item.id,
+          title: volumeInfo.title || 'Unknown Title',
+          author: volumeInfo.authors ? volumeInfo.authors.join(', ') : 'Unknown Author',
+          totalPages: volumeInfo.pageCount || 300,
+          image: volumeInfo.imageLinks?.thumbnail || 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover',
+        };
+      }).filter(book => book.totalPages > 0);
+
+      setSearchResults(formattedResults);
+
+    } catch (error) {
+      console.error("Error searching books:", error);
+      setMessage('Failed to search books. Check console for details.');
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const handleAddBook = async (bookToAdd) => {
+    if (!db || !userId || !bookToAdd.title || !bookToAdd.author || !bookToAdd.totalPages) {
+        setMessage('Cannot add book: missing title, author, or page count.');
+        return;
+    }
+
+    const finalImage = bookToAdd.image || 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover';
+
+    try {
+      const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+      const newBookRef = doc(collection(db, booksCollectionPath));
+
+      await setDoc(newBookRef, {
+        title: bookToAdd.title,
+        author: bookToAdd.author,
+        totalPages: Number(bookToAdd.totalPages),
+        pagesRead: 0,
+        status: 'To Read',
+        createdAt: Timestamp.now(),
+        image: finalImage,
+        notes: '', // Initialize notes field
+      });
+
+      setSearchQuery('');
+      setSearchResults([]);
+      setMessage(`"${bookToAdd.title}" added to your nook!`);
+      setTimeout(() => setMessage(''), 3000);
+
+    } catch (error) {
+      console.error("Error adding book:", error);
+      setMessage('Failed to add book. Check console for details.');
+    }
+  };
+
+  const handleUpdateProgress = async (bookId, pagesRead) => {
+    if (!db || !userId) return;
+
+    const book = books.find(b => b.id === bookId);
+    if (!book) return;
+
+    let newPagesRead = Number(pagesRead);
+    if (isNaN(newPagesRead) || newPagesRead < 0) return;
+    if (newPagesRead > book.totalPages) newPagesRead = book.totalPages;
+
+    let newStatus = book.status;
+    if (newPagesRead === 0) {
+      newStatus = 'To Read';
+    } else if (newPagesRead === book.totalPages) {
+      newStatus = 'Completed';
+    } else if (newPagesRead > 0 && book.status === 'To Read') {
+      newStatus = 'Reading';
+    }
+
+    try {
+      const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+      const bookRef = doc(db, booksCollectionPath, bookId);
+
+      await updateDoc(bookRef, {
+        pagesRead: newPagesRead,
+        status: newStatus,
+      });
+
+      if (newStatus === 'Completed') {
+        setMessage(`Congratulations! You finished "${book.title}"!`);
+        setTimeout(() => setMessage(''), 5000);
+      }
+    } catch (error) {
+      console.error("Error updating book progress:", error);
+    }
+  };
+
+  const handleUpdateStatus = async (bookId, newStatus) => {
+    if (!db || !userId) return;
+
+    const book = books.find(b => b.id === bookId);
+    if (!book) return;
+
+    let pagesRead = book.pagesRead;
+    if (newStatus === 'Completed') {
+      pagesRead = book.totalPages;
+    } else if (newStatus === 'To Read') {
+      pagesRead = 0;
+    } else if (newStatus === 'Reading' && pagesRead === 0) {
+      pagesRead = 1; // Start reading
+    }
+    
+    try {
+      const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+      const bookRef = doc(db, booksCollectionPath, bookId);
+
+      await updateDoc(bookRef, {
+        pagesRead: pagesRead,
+        status: newStatus,
+      });
+    } catch (error) {
+      console.error("Error updating book status:", error);
+    }
+  };
+  
+  const handleUpdateNotes = async (bookId, notes) => {
+    if (!db || !userId) return;
+
+    try {
+      const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+      const bookRef = doc(db, booksCollectionPath, bookId);
+
+      await updateDoc(bookRef, {
+        notes: notes,
+      });
+      setMessage('Notes saved!');
+      setTimeout(() => setMessage(''), 3000);
+    } catch (error) {
+      console.error("Error updating notes:", error);
+      setMessage('Failed to save notes.');
+    }
+  };
+
+  const handleDeleteBook = async (bookId) => {
+    if (!db || !userId) return;
+
+    const book = books.find(b => b.id === bookId);
+    if (book && window.confirm(`Are you sure you want to remove "${book.title}" from your cozy shelf?`)) { 
+      try {
+        const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
+        const bookRef = doc(db, booksCollectionPath, bookId);
+        await deleteDoc(bookRef);
+        setMessage(`"${book.title}" has been removed.`);
+        setTimeout(() => setMessage(''), 3000);
+      } catch (error) {
+        console.error("Error deleting book:", error);
+      }
+    }
+  };
+
+  // --- TTS Feature (Text-to-Speech Helper) ---
+  const speakText = useCallback(async (text) => {
+    if (!text) return;
+    setTtsLoading(true);
+
+    const payload = {
+      contents: [{ parts: [{ text: text }] }],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: TTS_VOICE } } }
+      },
+      model: "gemini-2.5-flash-preview-tts"
+    };
+
+    const apiKey = "";
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+
+    try {
+      const result = await makeApiRequest(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const part = result?.candidates?.[0]?.content?.parts?.[0];
+      const audioData = part?.inlineData?.data;
+      const mimeType = part?.inlineData?.mimeType;
+
+      if (audioData && mimeType && mimeType.startsWith("audio/")) {
+        const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+        const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
+        const pcmData = base64ToArrayBuffer(audioData);
+        const pcm16 = new Int16Array(pcmData);
+        const wavBlob = pcmToWav(pcm16, sampleRate);
+        const audioUrl = URL.createObjectURL(wavBlob);
+
+        const audio = new Audio(audioUrl);
+        audio.play().catch(e => console.error("Error playing audio:", e));
+      } else {
+        console.error("TTS response missing audio data.");
+      }
+    } catch (error) {
+      console.error("TTS API call failed:", error);
+    } finally {
+      setTtsLoading(false);
+    }
+  }, []);
+
+  const handleReadQuote = () => {
+    const quotes = [
+      "Welcome to the Book Nook Sisters! Grab a cup of tea and find your next adventure.",
+      "A chapter a day keeps the worries away.",
+      "Reading gives us somewhere to go when we have to stay where we are. Happy reading!",
+      "The world belongs to those who read. Keep turning those pages!",
+      "New books are new adventures. What will you read next?",
+    ];
+    const randomQuote = quotes[Math.floor(Math.random() * quotes.length)];
+    speakText(randomQuote);
+  };
+
+
+  // --- Helper Components & Rendering ---
+
+  // Fireplace Component (Fixed to top center, logs only)
+  const CozyFireplace = ({ isVisible }) => (
+    // Added transition and transform classes for fade/slide effect
+    <div className={`fixed top-0 left-1/2 transform -translate-x-1/2 z-[100] p-2 sm:p-4 transition-all duration-300 ease-in-out ${
+        isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full' // Hidden state: fade out and slide up
+    }`}> 
+      <div className="relative w-24 h-24"> {/* Smaller container, logs will sit here */}
+          {/* Flames (Scaled down slightly for smaller look) */}
+          <div className="absolute bottom-0 w-full h-full"> 
+            <div className="relative w-full h-full"> 
+              <div className="absolute bottom-0 w-full h-full bg-gradient-to-t from-red-800/90 via-orange-600/90 to-amber-400/80 rounded-t-full blur-md opacity-70 animate-fire"></div>
+              <div className="absolute bottom-0 w-2/3 h-2/3 bg-gradient-to-t from-orange-500/90 to-amber-300/90 rounded-t-full blur-sm mx-auto left-0 right-0"></div>
+              <div className="absolute bottom-0 w-1/2 h-1/2 bg-amber-200 rounded-t-full mx-auto left-0 right-0"></div>
+            </div>
+          </div>
+          
+          {/* Logs - Simple dark brown/black cylinders */}
+          <div className="absolute bottom-0 left-0 right-0 h-4 flex items-center justify-center space-x-1">
+              <div className="w-1/4 h-3 bg-neutral-800 rounded-full shadow-inner shadow-neutral-900 border border-neutral-700 transform rotate-[-5deg]"></div>
+              <div className="w-1/3 h-4 bg-neutral-800 rounded-full shadow-inner shadow-neutral-900 border border-neutral-700"></div>
+              <div className="w-1/4 h-3 bg-neutral-800 rounded-full shadow-inner shadow-neutral-900 border border-neutral-700 transform rotate-[5deg]"></div>
+          </div>
+      </div>
+    </div>
+  );
+
+
+  const StatusButton = ({ status, currentStatus, onClick }) => {
+    const baseClasses = "flex-1 px-3 py-1.5 text-xs font-semibold rounded-full transition duration-150 shadow-inner";
+    let icon, classes, text;
+
+    switch (status) {
+      case 'To Read':
+        icon = <List size={14} />;
+        text = 'TBR';
+        classes = currentStatus === status
+          ? 'bg-amber-500 text-gray-900 ring-2 ring-amber-300'
+          : 'bg-amber-300/20 text-amber-300 hover:bg-amber-400/30';
+        break;
+      case 'Reading':
+        icon = <BookOpen size={14} />;
+        text = 'Reading';
+        classes = currentStatus === status
+          ? 'bg-orange-500 text-gray-900 ring-2 ring-orange-300'
+          : 'bg-orange-300/20 text-orange-300 hover:bg-orange-400/30';
+        break;
+      case 'Completed':
+        icon = <CheckCircle size={14} />;
+        text = 'Done!';
+        classes = currentStatus === status
+          ? 'bg-lime-400 text-gray-900 ring-2 ring-lime-300'
+          : 'bg-lime-300/20 text-lime-300 hover:bg-lime-400/30';
+        break;
+      default:
+        return null;
+    }
+
+    return (
+      <button
+        onClick={() => onClick(status)}
+        className={`${baseClasses} ${classes} flex items-center justify-center space-x-1 transform hover:scale-105 active:scale-95`} // Added scaling effects
+        aria-pressed={currentStatus === status}
+      >
+        {icon}
+        <span className="hidden sm:inline">{text}</span>
+      </button>
+    );
+  };
+
+  const BookCard = ({ book, index }) => {
+    const progress = (book.pagesRead / book.totalPages) * 100;
+    const [isNotesOpen, setIsNotesOpen] = useState(false);
+    const [currentNotes, setCurrentNotes] = useState(book.notes);
+
+    const progressClasses = useMemo(() => {
+      let colorClass = 'bg-orange-500';
+      if (book.status === 'Completed') colorClass = 'bg-lime-400';
+      if (book.status === 'To Read') colorClass = 'bg-amber-400';
+      return colorClass;
+    }, [book.status]);
+
+    const [currentPagesRead, setCurrentPagesRead] = useState(book.pagesRead);
+
+    useEffect(() => {
+      setCurrentPagesRead(book.pagesRead);
+      setCurrentNotes(book.notes);
+    }, [book.pagesRead, book.notes]);
+
+
+    const handleProgressChange = (e) => {
+      let value = Number(e.target.value);
+      if (value < 0) value = 0;
+      if (value > book.totalPages) value = book.totalPages;
+      setCurrentPagesRead(value);
+    };
+
+    const handleSaveProgress = () => {
+      if (currentPagesRead !== book.pagesRead) {
+        handleUpdateProgress(book.id, currentPagesRead);
+      }
+    };
+    
+    const handleNoteSave = () => {
+        handleUpdateNotes(book.id, currentNotes);
+        setIsNotesOpen(false);
+    };
+
+    const statusOptions = ['To Read', 'Reading', 'Completed'];
+
+    return (
+      <div 
+        className="bg-gray-800 text-gray-100 p-4 rounded-3xl shadow-2xl border border-gray-700 transform transition-all duration-300 hover:shadow-3xl hover:scale-[1.01] flex flex-col gap-3 group animate-slide-up"
+        style={{ animationDelay: `${index * 50}ms` }}
+      >
+        {/* Header and Title */}
+        <div className="flex justify-between items-start">
+          <div className="flex items-start gap-3">
+            <img 
+                src={book.image} 
+                alt={`${book.title} cover`} 
+                className="w-10 h-14 object-cover rounded shadow-md flex-shrink-0 border border-gray-600"
+                onError={(e) => e.currentTarget.src = 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover'}
+            />
+            <div className='flex-1 min-w-0'>
+              <h3 className="text-lg font-bold text-white line-clamp-2">{book.title}</h3>
+              <p className="text-sm text-gray-400 italic">by {book.author}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => handleDeleteBook(book.id)}
+            className="text-red-500 hover:text-red-300 transition duration-150 p-1 rounded-full bg-gray-700/50 transform hover:rotate-6 opacity-80 hover:opacity-100" // Added rotation on hover
+            aria-label={`Delete ${book.title}`}
+          >
+            <Trash2 size={20} />
+          </button>
+        </div>
+
+        {/* Status Buttons */}
+        <div className="flex space-x-2 p-1 bg-gray-900 rounded-xl">
+          {statusOptions.map(status => (
+            <StatusButton
+              key={status}
+              status={status}
+              currentStatus={book.status}
+              onClick={(newStatus) => handleUpdateStatus(book.id, newStatus)}
+            />
+          ))}
+        </div>
+
+        {/* Progress Bar */}
+        <div className="space-y-1">
+          <div className="flex justify-between text-sm font-medium text-gray-300">
+            <span>Progress:</span>
+            <span>{book.pagesRead} / {book.totalPages} pages</span>
+          </div>
+          <div className="w-full bg-gray-700 rounded-full h-2.5 overflow-hidden">
+            <div
+              className={`h-2.5 rounded-full transition-all duration-500 ${progressClasses}`}
+              style={{ width: `${Math.min(100, progress)}%` }}
+            ></div>
+          </div>
+        </div>
+
+        {/* Progress Input */}
+        <div className="flex gap-2 items-center">
+          <input
+            type="number"
+            value={currentPagesRead}
+            onChange={handleProgressChange}
+            onBlur={handleSaveProgress}
+            min="0"
+            max={book.totalPages}
+            aria-label="Pages read"
+            className="flex-1 w-full p-2 border border-gray-700 rounded-lg focus:ring-orange-500 focus:border-orange-500 text-sm bg-gray-900 text-white transition duration-150"
+          />
+          <span className="text-sm text-gray-400">of {book.totalPages}</span>
+          <button
+            onClick={handleSaveProgress}
+            className="bg-orange-500 text-black p-2 rounded-lg hover:bg-orange-600 transition duration-150 text-sm font-semibold shadow-md active:scale-95 disabled:opacity-50 disabled:scale-100 disabled:shadow-none"
+            disabled={currentPagesRead === book.pagesRead}
+          >
+            Save
+          </button>
+        </div>
+        
+        {/* Notes Feature */}
+        <div className="mt-3 border-t border-gray-700 pt-3">
+            <button
+                onClick={() => setIsNotesOpen(prev => !prev)}
+                className="flex items-center space-x-2 text-sm font-medium text-amber-300 hover:text-amber-500 transition transform hover:translate-x-0.5" // Subtle slide on hover
+            >
+                <Pencil size={16} />
+                <span>{isNotesOpen ? 'Close Notes' : 'Add/View Notes'}</span>
+            </button>
+            {isNotesOpen && (
+                <div className="mt-3">
+                    <textarea
+                        value={currentNotes}
+                        onChange={(e) => setCurrentNotes(e.target.value)}
+                        placeholder="Write your thoughts on this book..."
+                        className="w-full h-24 p-3 border border-gray-700 rounded-lg focus:ring-orange-500 focus:border-orange-500 text-sm bg-gray-900 text-white"
+                    />
+                    <button
+                        onClick={handleNoteSave}
+                        className="mt-2 w-full bg-orange-500 text-black font-semibold py-1.5 rounded-lg hover:bg-orange-600 transition duration-150 active:scale-95 flex items-center justify-center space-x-2"
+                    >
+                        <Save size={16} />
+                        <span>Save Notes</span>
+                    </button>
+                </div>
+            )}
+        </div>
+      </div>
+    );
+  };
+
+  const FilteredBookList = useMemo(() => {
+    if (loading || !userId) {
+      return (
+        <div className="flex justify-center items-center h-48">
+          <Loader2 size={32} className="animate-spin text-orange-500" />
+          <p className="ml-3 text-lg text-gray-300">Loading your cozy nook...</p>
+        </div>
+      );
+    }
+    
+    const filteredBooks = books.filter(book => 
+      filterStatus === 'All' || book.status === filterStatus
+    );
+
+    if (filteredBooks.length === 0) {
+      let message;
+      switch (filterStatus) {
+        case 'To Read':
+          message = "Your TBR list is empty! Ready to find a new read?";
+          break;
+        case 'Reading':
+          message = "Time to start a new book! Nothing is currently being read.";
+          break;
+        case 'Completed':
+          message = "No finished books yet! Keep up the great reading!";
+          break;
+        default:
+          message = "Search for and add your first book above to start tracking your reading journey.";
+      }
+
+      return (
+        <div className="text-center p-8 bg-gray-800 rounded-3xl mt-6 border-2 border-dashed border-gray-700 shadow-xl transition-all duration-300 animate-slide-up">
+          <List size={48} className="mx-auto text-orange-400 mb-3" />
+          <h4 className="text-xl font-semibold text-gray-100">No Books Found in "{filterStatus}"</h4>
+          <p className="text-gray-400">{message}</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 transition-all duration-500">
+        {filteredBooks.map((book, index) => (
+          <BookCard 
+            key={book.id} 
+            book={{ 
+                ...book, 
+                image: book.image || 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover'
+            }} 
+            index={index}
+          />
+        ))}
+      </div>
+    );
+  }, [books, loading, userId, filterStatus]);
+  
+  // Tab Navigation Component
+  const TabNav = ({ currentStatus, setStatus }) => {
+    const statuses = ['All', 'To Read', 'Reading', 'Completed'];
+    return (
+      <div className="flex justify-center space-x-2 p-2 bg-gray-800 rounded-xl shadow-inner mb-8 transition-all">
+        {statuses.map(status => (
+          <button
+            key={status}
+            onClick={() => setStatus(status)}
+            className={`px-4 py-2 text-sm font-semibold rounded-lg transition duration-200 shadow-md transform hover:scale-105 active:scale-95 ${ // Added scaling
+              currentStatus === status
+                ? 'bg-orange-500 text-black shadow-orange-700/50'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            {status} ({status === 'All' ? books.length : books.filter(b => b.status === status).length})
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+
+  // --- Conditional Render: Loading Check ---
+  if (loading || !userId) {
+    return (
+        <div className="min-h-screen bg-gray-900 p-8 flex items-center justify-center">
+            <Loader2 size={40} className="animate-spin text-orange-500" />
+            <p className="ml-4 text-xl text-gray-300">Setting up the cozy corner...</p>
+        </div>
+    );
+  }
+
+  // --- Main Tracker Render ---
+  return (
+    // Apply the custom handwritten font class here
+    <div className="min-h-screen bg-gray-900 p-4 sm:p-8 font-handwritten">
+        {/* Custom CSS for animations and new font */}
+        <style jsx="true">{`
+            @import url('https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap');
+
+            .font-handwritten {
+                font-family: 'Kalam', cursive;
+            }
+            
+            @keyframes pulse-fire {
+                0%, 100% { opacity: 0.7; transform: scale(1); }
+                50% { opacity: 0.9; transform: scale(1.05); }
+            }
+            .animate-fire {
+                animation: pulse-fire 2s infinite ease-in-out alternate;
+            }
+            
+            @keyframes slide-up {
+                0% { opacity: 0; transform: translateY(20px); }
+                100% { opacity: 1; transform: translateY(0); }
+            }
+            .animate-slide-up {
+                animation: slide-up 0.5s ease-out forwards;
+                opacity: 0; /* Ensures it starts invisible before the delay */
+            }
+        `}</style>
+      
+      <CozyFireplace isVisible={isFireplaceVisible} /> {/* Pass the visibility state */}
+
+      {/* Main Content */}
+      <div> 
+        <AnimateOnScroll delay={0}>
+          <header className="max-w-4xl mx-auto mb-10 pt-20"> 
+            <div className="flex justify-center items-center mb-6">
+                {/* Logo and Title */}
+                <div className="flex items-center space-x-2 text-orange-500">
+                    <BookOpen size={36} className="text-orange-500" />
+                    <h1 className="text-3xl font-extrabold tracking-tight text-orange-500 drop-shadow-sm">
+                        Book Nook Sisters
+                    </h1>
+                </div>
+            </div>
+            <p className="mt-2 text-md text-gray-400 text-center">
+                Your personalized reading sanctuary.
+            </p>
+          </header>
+        </AnimateOnScroll>
+        
+        {/* Message and TTS */}
+        {message && (
+          <div className="fixed top-4 right-4 bg-lime-900 text-lime-300 p-3 rounded-xl shadow-lg border border-lime-700 transition-all duration-300 z-50">
+            {message}
+          </div>
+        )}
+
+        <div className="max-w-4xl mx-auto">
+          {/* Quote/TTS Button - Staggered reveal */}
+          <AnimateOnScroll delay={100}>
+            <div className="flex justify-center mb-10">
+              <button
+                onClick={handleReadQuote}
+                disabled={ttsLoading}
+                className="flex items-center space-x-2 bg-purple-600 text-white px-4 py-2 rounded-full font-semibold shadow-xl hover:bg-purple-700 transition duration-200 active:scale-95 disabled:bg-gray-700 transform hover:scale-105" 
+              >
+                {ttsLoading ? <Loader2 size={20} className="animate-spin" /> : <Clock size={20} />}
+                <span>{ttsLoading ? 'Getting Cozy...' : 'Read Me a Quote'}</span>
+              </button>
+            </div>
+          </AnimateOnScroll>
+
+          {/* Add Book Search Section - Staggered reveal */}
+          <AnimateOnScroll delay={200}>
+            <section className="mb-10 bg-gray-800 p-6 rounded-3xl shadow-2xl border-t-8 border-orange-500 transition-all duration-300 hover:shadow-3xl"> 
+              <h2 className="text-2xl font-bold text-gray-100 mb-4 flex items-center space-x-2">
+                <Search size={24} className="text-amber-300" />
+                <span>Find Your Next Cozy Read</span>
+              </h2>
+              <form onSubmit={handleSearchBooks} className="flex gap-3 mb-4">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search by Title or Author..."
+                  required
+                  className="flex-1 p-3 border border-gray-700 rounded-xl focus:ring-orange-500 focus:border-orange-500 bg-gray-900 text-white transition duration-150"
+                />
+                <button
+                  type="submit"
+                  disabled={searchLoading}
+                  className="bg-orange-500 text-black font-bold px-5 py-3 rounded-xl hover:bg-orange-600 transition duration-200 shadow-lg active:scale-95 disabled:bg-gray-700 flex items-center justify-center transform hover:scale-[1.02]" 
+                >
+                  {searchLoading ? <Loader2 size={20} className="animate-spin text-black" /> : 'Search'}
+                </button>
+              </form>
+
+              {/* Search Results */}
+              {searchResults.length > 0 && (
+                <div className="mt-4 border-t border-gray-700 pt-4">
+                  <h3 className="font-semibold text-lg mb-3 text-gray-200">Select a Book to Add:</h3>
+                  <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
+                    {searchResults.map(book => (
+                      <div
+                        key={book.id}
+                        className="flex items-center p-3 bg-gray-900 rounded-xl hover:bg-gray-700 transition duration-150 cursor-pointer border border-gray-700 shadow-md transform hover:translate-x-1 hover:scale-[1.01]" 
+                        onClick={() => handleAddBook(book)}
+                      >
+                        <img 
+                            src={book.image} 
+                            alt={`${book.title} cover`} 
+                            className="w-10 h-14 object-cover rounded shadow-md mr-3 flex-shrink-0"
+                            onError={(e) => e.currentTarget.src = 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover'}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-white truncate">{book.title}</p>
+                          <p className="text-sm text-gray-400">by {book.author} ({book.totalPages} pages)</p>
+                        </div>
+                        <PlusCircle size={20} className="text-orange-500 ml-4 flex-shrink-0 transform group-hover:rotate-90 transition duration-300" />
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2 text-center">Page counts are estimates from Google Books API.</p>
+                </div>
+              )}
+            </section>
+          </AnimateOnScroll>
+
+          {/* Book List / Reading Progress - Staggered reveal */}
+          <AnimateOnScroll delay={300}>
+            <section>
+              <h2 className="text-2xl font-bold text-gray-100 mb-6 flex items-center space-x-2">
+                <BookOpen size={24} className="text-orange-500" />
+                <span>My Book Progress</span>
+              </h2>
+              
+              <TabNav currentStatus={filterStatus} setStatus={setFilterStatus} />
+
+              {FilteredBookList}
+            </section>
+          </AnimateOnScroll>
+        </div>
+
+        {/* Footer / Copyright Aesthetic */}
+        <AnimateOnScroll delay={400}>
+            <footer className="mt-12 text-center text-xs text-gray-500 border-t border-gray-700 pt-4">
+              &copy; {new Date().getFullYear()} Book Nook Sisters Tracker. Built for cozy reading.
+            </footer>
+        </AnimateOnScroll>
+      </div>
+    </div>
+  );
+};
+
+export default App;
