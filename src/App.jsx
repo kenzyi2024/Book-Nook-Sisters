@@ -6,9 +6,21 @@ import {
 import { getFirestore, collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, query, orderBy, Timestamp } from 'firebase/firestore';
 import { BookOpen, PlusCircle, Trash2, CheckCircle, Clock, List, Loader2, Search, Pencil, Save } from 'lucide-react';
 
+// --- Placeholder Firebase Configuration (Needed for Vercel Deployment) ---
+// **WARNING: Replace these with your actual Firebase config details to enable persistent data storage.**
+const PLACEHOLDER_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyC2dEaFgHiJkLmNoPqRsTuVwXyZ012345678", // Replace this
+  authDomain: "project-id.firebaseapp.com", // Replace this
+  projectId: "project-id", // Replace this
+  storageBucket: "project-id.appspot.com", // Replace this
+  messagingSenderId: "123456789012", // Replace this
+  appId: "1:123456789012:web:a1b2c3d4e5f6g7h8i9j0", // Replace this
+};
+
 // --- Global Firebase Configuration Variables ---
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+// We use a fallback check here. On Vercel, __firebase_config will be undefined.
+const appId = typeof __app_id !== 'undefined' ? __app_id : PLACEHOLDER_FIREBASE_CONFIG.projectId;
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : PLACEHOLDER_FIREBASE_CONFIG;
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 // --- End Global Variables ---
 
@@ -152,7 +164,8 @@ const App = () => {
   // --- Firebase Initialization and Anonymous Authentication ---
   useEffect(() => {
     try {
-      const app = initializeApp(firebaseConfig);
+      // Use the (possibly placeholder) config object
+      const app = initializeApp(firebaseConfig); 
       const firestoreDb = getFirestore(app);
       const firebaseAuth = getAuth(app);
 
@@ -165,6 +178,7 @@ const App = () => {
           if (initialAuthToken) {
             userCredential = await signInWithCustomToken(firebaseAuth, initialAuthToken);
           } else {
+            // This is the fallback/standard anonymous sign-in for users
             userCredential = await signInAnonymously(firebaseAuth);
           }
           // Set the user ID from the successful sign-in
@@ -175,14 +189,17 @@ const App = () => {
           setUserId(crypto.randomUUID()); 
           setMessage("Warning: Could not connect to user profile. Data may not be saved persistently.");
         } finally {
-          setLoading(false);
+          // This must run successfully for the app to move past the initial loading screen
+          setLoading(false); 
         }
       };
 
       setupAuth();
     } catch (e) {
       console.error("Error initializing Firebase:", e);
+      // Ensure loading is false even if init fails, so users can see the UI/error message
       setLoading(false);
+      setMessage("ERROR: Firebase initialization failed. Check your config in App.jsx.");
     }
   }, []);
   
@@ -206,6 +223,8 @@ const App = () => {
   useEffect(() => {
     // Only fetch data if DB is ready, we have a userId, and we're done loading
     if (db && userId && !loading) {
+      // NOTE: This collection path relies on Firebase Security Rules being set correctly
+      // to allow the signed-in anonymous user to read/write their data.
       const booksCollectionPath = `artifacts/${appId}/users/${userId}/books`;
       const q = query(collection(db, booksCollectionPath), orderBy('createdAt', 'desc')); 
 
@@ -218,7 +237,9 @@ const App = () => {
         }));
         setBooks(bookList);
       }, (error) => {
-        console.error("Error fetching books:", error);
+        // This is where a security rule error will likely show up in the console.
+        console.error("Error fetching books (Check Firestore Security Rules):", error);
+        setMessage("ERROR: Could not load books. Check Firestore security rules or config.");
       });
 
       return () => unsubscribe();
@@ -707,7 +728,7 @@ const App = () => {
       }
 
       return (
-        <div className="text-center p-8 bg-gray-800 rounded-3xl mt-6 border-2 border-dashed border-gray-700 shadow-xl transition-all duration-300 animate-slide-up">
+        <div className="text-center p-8 bg-gray-800 rounded-3xl mt-6 border-2 border-dashed border-gray-700 shadow-xl transition-all duration-300">
           <List size={48} className="mx-auto text-orange-400 mb-3" />
           <h4 className="text-xl font-semibold text-gray-100">No Books Found in "{filterStatus}"</h4>
           <p className="text-gray-400">{message}</p>
@@ -718,14 +739,15 @@ const App = () => {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 transition-all duration-500">
         {filteredBooks.map((book, index) => (
-          <BookCard 
-            key={book.id} 
-            book={{ 
-                ...book, 
-                image: book.image || 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover'
-            }} 
-            index={index}
-          />
+          <AnimateOnScroll key={book.id} delay={index * 50}>
+            <BookCard 
+              book={{ 
+                  ...book, 
+                  image: book.image || 'https://placehold.co/40x56/E5E7EB/A1A1AA?text=No+Cover'
+              }} 
+              index={index}
+            />
+          </AnimateOnScroll>
         ))}
       </div>
     );
@@ -803,7 +825,7 @@ const App = () => {
             <div className="flex justify-center items-center mb-6">
                 {/* Logo and Title */}
                 <div className="flex items-center space-x-2 text-orange-500">
-                    <BookOpen size={36} className="text-orange-500" />
+                    <BookOpen size={36} className="text-orange-510" />
                     <h1 className="text-3xl font-extrabold tracking-tight text-orange-500 drop-shadow-sm">
                         Book Nook Sisters
                     </h1>
